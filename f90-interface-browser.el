@@ -1,12 +1,12 @@
-;;; f90-interface-browser.el --- Parse and browse f90 interfaces
+;;; f90-interface-browser.el --- Parse and browse f90 interfaces  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2011, 2012, 2013, 2014, 2015  Free Software Foundation, Inc
+;; Copyright (C) 2011-2021  Free Software Foundation, Inc
 
 ;; Author: Lawrence Mitchell <wence@gmx.li>
 ;; Created: 2011-07-06
 ;; URL: http://github.com/wence-/f90-iface/
 ;; Version: 1.1
-;; Package-Type: simple
+;; Package-Requires: ((cl-lib "0.7"))
 
 ;; COPYRIGHT NOTICE
 
@@ -41,10 +41,9 @@
 ;; Alternatively, if `point' is on a procedure call, you can call
 ;; `f90-find-tag-interface' and you'll be shown a list of the
 ;; interfaces that match the (possibly typed) argument list of the
-;; current procedure.  This latter hooks into the `find-tag' machinery
-;; so that you can use it on the M-.  keybinding and it will fall back
-;; to completing tag names if you don't want to look for an interface
-;; definition.
+;; current procedure.  This latter falls back on Xref so that you can bind
+;; it to the `M-.' and it will fall back to completing tag names if you
+;; don't want to look for an interface definition.
 ;; In addition, if you're in a large procedure and want the list of
 ;; the variables in scope (perhaps you want to define a new loop
 ;; variable), you can use `f90-list-in-scope-vars' to pop up a buffer
@@ -103,7 +102,7 @@
 ;;; Code:
 
 ;;; Preamble
-(eval-when-compile (require 'cl))
+(eval-when-compile (require 'cl-lib))
 (require 'thingatpt)
 (require 'f90)
 (require 'etags)
@@ -115,11 +114,10 @@
 
 (defcustom f90-file-extensions (list "f90" "F90" "fpp")
   "Extensions to consider when looking for Fortran 90 files."
-  :type '(repeat string)
-  :group 'f90-iface)
+  :type '(repeat string))
 
 (defcustom f90-file-name-check-functions '(f90-check-fluidity-refcount)
-  "List of functions to call to check if a file should be parsed.
+  "Special hook run to check if a file should be parsed.
 
 In addition to checking if a file exists and is readable, you can
 add extra checks before deciding to parse a file.  Each function
@@ -127,17 +125,15 @@ will be called with one argument, the fully qualified name of the
 file to test, it should return non-nil if the file should be
 parsed.  For an example test function see
 `f90-check-fluidity-refcount'."
-  :type '(repeat function)
-  :group 'f90-iface)
+  :type '(repeat function))
 
 (defcustom f90-extra-file-functions '(f90-insert-fluidity-refcount)
-  "List of functions to call to insert extra files to parse.
+  "Special hook run to insert extra files to parse.
 
 Each function should be a function of two arguments, the first is the
 fully qualified filename (with directory) the second is the
 unqualified filename."
-  :type '(repeat function)
-  :group 'f90-iface)
+  :type '(repeat function))
 
 ;;; Internal variables
 (defvar f90-interface-type nil)
@@ -150,12 +146,12 @@ unqualified filename."
 (make-variable-buffer-local 'f90-invocation-marker)
 
 ;; Data types for storing interface and specialiser definitions
-(defstruct f90-interface
+(cl-defstruct f90-interface
   (name "" :read-only t)
   (publicp nil)
   specialisers)
 
-(defstruct f90-specialiser
+(cl-defstruct f90-specialiser
   (name "" :read-only t)
   (type "")
   (arglist "")
@@ -171,6 +167,13 @@ The keys are type names and the values are lists of pairs of the form
 describes that slot.")
 
 ;;; Inlineable utility functions
+
+(defmacro f90--with-suppressed-warnings (spec &rest body)
+  (declare (indent 1) (debug (sexp body)))
+  (if (fboundp 'with-suppressed-warnings)
+      `(with-suppressed-warnings ,spec ,@body)
+    `(with-no-warnings ,@body)))
+
 (defsubst f90-specialisers (name interfaces)
   "Return all specialisers for NAME in INTERFACES."
   (f90-interface-specialisers (f90-get-interface name interfaces)))
@@ -219,7 +222,7 @@ level.  For example, a LEVEL of 0 counts top-level commas."
 
 (defun f90-lazy-completion-table ()
   "Lazily produce a completion table of all interfaces and tag names."
-  (lexical-let ((buf (current-buffer)))
+  (let ((buf (current-buffer)))
     (lambda (string pred action)
       (with-current-buffer buf
         (save-excursion
@@ -264,17 +267,17 @@ an alphanumeric character."
 		 (file-directory-p file)
                  (setq pending (nconc pending
                                       (list (expand-file-name file)))))))))
-    (mapc 'f90-parse-interfaces-in-dir dirs)))
+    (mapc #'f90-parse-interfaces-in-dir dirs)))
 
 (defun f90-parse-interfaces-in-dir (dir)
   "Parse all Fortran 90 files in DIR to populate `f90-all-interfaces'."
   (interactive "DParse files in directory: ")
-  (loop for file in (directory-files dir t
-                                     (rx-to-string
-                                      `(and "." (or ,@f90-file-extensions)
-                                            eos)
-                                      t))
-        do (f90-parse-interfaces file f90-all-interfaces)))
+  (cl-loop for file in (directory-files dir t
+                                        (rx-to-string
+                                         `(and "." (or ,@f90-file-extensions)
+                                               eos)
+                                         t))
+           do (f90-parse-interfaces file f90-all-interfaces)))
 
 (defun f90-find-tag-interface (name &optional match-sublist)
   "List all interfaces matching NAME.
@@ -284,17 +287,22 @@ the word at point.  If MATCH-SUBLIST is non-nil, only check if
 the arglist is a sublist of the specialiser's arglist.  For more
 details see `f90-approx-arglist-match' and
 `f90-browse-interface-specialisers'."
+  ;; FIXME: Make it an xref backend?
   (interactive (let ((def (thing-at-point 'symbol)))
                  (list (completing-read
                         (format "Find interface/tag (default %s): " def)
                         (f90-lazy-completion-table)
                         nil t nil nil def)
                        current-prefix-arg)))
-  (if (f90-valid-interface-name name)
-      (f90-browse-interface-specialisers name (f90-arglist-types)
-                                         match-sublist
-                                         (point-marker))
-    (find-tag name match-sublist)))
+  (cond
+   ((f90-valid-interface-name name)
+    (f90-browse-interface-specialisers name (f90-arglist-types)
+                                       match-sublist
+                                       (point-marker)))
+   ((fboundp 'xref-find-definitions)    ;Emacs≥25
+    (xref-find-definitions name))
+   (t (f90--with-suppressed-warnings ((obsolete find-tag))
+        (find-tag name match-sublist)))))
 
 (defun f90-browse-interface-specialisers (name &optional arglist-to-match
                                                match-sublist
@@ -326,37 +334,37 @@ indicating where we were called from, for jumping back to with
         (setq buffer-read-only nil)
         (erase-buffer)
         (setq n-specs
-              (loop for s being the hash-values of
-                    (f90-interface-specialisers interface)
-                    do (setq type (f90-specialiser-type s))
-                    when (or (null arglist-to-match)
-                             (f90-approx-arglist-match
-                              arglist-to-match s match-sublist))
-                    do (insert
-                        (propertize
-                         (concat
-                          (propertize
-                           (format "%s [defined in %s]\n    (%s)\n"
-                                   (propertize (f90-specialiser-name s)
-                                               'face 'bold)
-                                   (let ((f (car
-                                             (f90-specialiser-location s))))
-                                     (format "%s/%s"
-                                             (file-name-nondirectory
-                                              (directory-file-name
-                                               (file-name-directory f)))
-                                             (file-name-nondirectory f)))
-                                   (f90-fontify-arglist
-                                    (f90-specialiser-arglist s)))
-                           'f90-specialiser-location
-                           (f90-specialiser-location s)
-                           'f90-specialiser-name (f90-specialiser-name s)
-                           'mouse-face 'highlight
-                           'help-echo
-                           "mouse-1: find definition in other window")
-                          "\n")
-                         'f90-specialiser-extent (f90-specialiser-name s)))
-                    and count 1))
+              (cl-loop for s being the hash-values of
+                       (f90-interface-specialisers interface)
+                       do (setq type (f90-specialiser-type s))
+                       when (or (null arglist-to-match)
+                                (f90-approx-arglist-match
+                                 arglist-to-match s match-sublist))
+                       do (insert
+                           (propertize
+                            (concat
+                             (propertize
+                              (format "%s [defined in %s]\n    (%s)\n"
+                                      (propertize (f90-specialiser-name s)
+                                                  'face 'bold)
+                                      (let ((f (car
+                                                (f90-specialiser-location s))))
+                                        (format "%s/%s"
+                                                (file-name-nondirectory
+                                                 (directory-file-name
+                                                  (file-name-directory f)))
+                                                (file-name-nondirectory f)))
+                                      (f90-fontify-arglist
+                                       (f90-specialiser-arglist s)))
+                              'f90-specialiser-location
+                              (f90-specialiser-location s)
+                              'f90-specialiser-name (f90-specialiser-name s)
+                              'mouse-face 'highlight
+                              'help-echo
+                              "mouse-1: find definition in other window")
+                             "\n")
+                            'f90-specialiser-extent (f90-specialiser-name s)))
+                       and count 1))
         (goto-char (point-min))
         (insert (format "Interfaces for %s:\n\n"
                         (f90-interface-name interface)))
@@ -382,7 +390,7 @@ indicating where we were called from, for jumping back to with
                 (point)
                 'f90-specialiser-extent
                 nil (point-max)))
-    (decf arg)))
+    (cl-decf arg)))
 
 (defun f90-previous-definition (&optional arg)
   "Go to the previous ARG'th specialiser definition."
@@ -390,13 +398,13 @@ indicating where we were called from, for jumping back to with
   (unless arg
     (setq arg 1))
   (while (> arg 0)
-    (loop repeat 2
-          do (goto-char (previous-single-property-change
-                         (point)
-                         'f90-specialiser-extent
-                         nil (point-min))))
+    (cl-loop repeat 2
+             do (goto-char (previous-single-property-change
+                            (point)
+                            'f90-specialiser-extent
+                            nil (point-min))))
     (f90-next-definition 1)
-    (decf arg)))
+    (cl-decf arg)))
 
 (defun f90-mouse-find-definition (e)
   "Visit the definition at the position of the event E."
@@ -424,32 +432,36 @@ indicating where we were called from, for jumping back to with
         (type f90-interface-type)
         (buf (current-buffer))
         buf-to)
-    (if location
-        (progn (ring-insert find-tag-marker-ring f90-invocation-marker)
-               (find-file-other-window (car location))
-               (setq buf-to (current-buffer))
-               (goto-char (cadr location))
-               ;; Try forwards then backwards near the recorded
-               ;; location
-               (or (re-search-forward (format "%s[ \t]+%s[ \t]*("
-                                              type name) nil t)
-                   (re-search-backward (format "%s[ \t]+%s[ \t]*("
-                                               type name) nil t))
-               (beginning-of-line)
-               (recenter 0)
-               (pop-to-buffer buf)
-               (setq f90-buffer-to-switch-to buf-to))
-      (error "No definition at point"))))
+    (if (not location)
+        (error "No definition at point")
+      (if (fboundp 'xref-push-marker-stack) ;Emacs≥25
+          (xref-push-marker-stack f90-invocation-marker)
+        (f90--with-suppressed-warnings ((obsolete find-tag-marker-ring))
+          (ring-insert find-tag-marker-ring f90-invocation-marker)))
+      (find-file-other-window (car location))
+      (setq buf-to (current-buffer))
+      (goto-char (cadr location))
+      ;; Try forwards then backwards near the recorded location.
+      (or (re-search-forward (format "%s[ \t]+%s[ \t]*("
+                                     type name)
+                             nil t)
+          (re-search-backward (format "%s[ \t]+%s[ \t]*("
+                                      type name)
+                              nil t))
+      (beginning-of-line)
+      (recenter 0)
+      (pop-to-buffer buf)
+      (setq f90-buffer-to-switch-to buf-to))))
 
 (defvar f90-interface-browser-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") 'f90-find-definition)
-    (define-key map (kbd "<down>") 'f90-next-definition)
-    (define-key map (kbd "TAB") 'f90-next-definition)
-    (define-key map (kbd "<up>") 'f90-previous-definition)
-    (define-key map (kbd "<backtab>") 'f90-previous-definition)
-    (define-key map (kbd "q") 'f90-quit-browser)
-    (define-key map (kbd "<mouse-1>") 'f90-mouse-find-definition)
+    (define-key map (kbd "RET")       #'f90-find-definition)
+    (define-key map (kbd "<down>")    #'f90-next-definition)
+    (define-key map (kbd "TAB")       #'f90-next-definition)
+    (define-key map (kbd "<up>")      #'f90-previous-definition)
+    (define-key map (kbd "<backtab>") #'f90-previous-definition)
+    (define-key map (kbd "q")         #'f90-quit-browser)
+    (define-key map (kbd "<mouse-1>") #'f90-mouse-find-definition)
     map)
   "Keymap for `f90-interface-browser-mode'.")
 
@@ -499,8 +511,8 @@ default is the type of the variable."
   (interactive (list (let ((def (f90-type-at-point)))
                        (completing-read
                         (if def (format "Type (default %s): " def) "Type: ")
-                        (loop for type being the hash-keys of f90-types
-                              collect (f90-extract-type-name type))
+                        (cl-loop for type being the hash-keys of f90-types
+                                 collect (f90-extract-type-name type))
                         nil t nil nil def))))
   (with-current-buffer (get-buffer-create "*Type definition*")
     (setq buffer-read-only nil)
@@ -512,11 +524,11 @@ default is the type of the variable."
           (insert (format "The type %s is not a known derived type."
                           type))
         (insert (format "type %s\n" type))
-        (loop for slot in slots
-              do
-              (insert (format "  %s :: %s\n"
-                              (f90-format-parsed-slot-type slot)
-                              (f90-get-parsed-type-varname slot))))
+        (cl-loop for slot in slots
+                 do
+                 (insert (format "  %s :: %s\n"
+                                 (f90-format-parsed-slot-type slot)
+                                 (f90-get-parsed-type-varname slot))))
         (insert (format "end type %s\n" type))
         (f90-mode))
       (goto-char (point-min))
@@ -531,19 +543,20 @@ default is the type of the variable."
       "UNION-TYPE"
     ;; Ignore name
     (setq type (cdr type))
-    (mapconcat #'identity (loop for a in type
-                               if (and (consp a)
-                                       (string= (car a) "dimension"))
-                               collect (format "dimension(%s)"
-                                               (mapconcat #'identity
-                                                          (make-list (cdr a)
-                                                                     ":")
-                                                          ","))
-                               else if (not
-                                        (string-match
-                                         "\\`intent(\\(?:in\\|out\\|inout\\))"
-                                         a))
-                               collect a)
+    (mapconcat #'identity
+               (cl-loop for a in type
+                        if (and (consp a)
+                                (string= (car a) "dimension"))
+                        collect (format "dimension(%s)"
+                                        (mapconcat #'identity
+                                                   (make-list (cdr a)
+                                                              ":")
+                                                   ","))
+                        else if (not
+                                 (string-match
+                                  "\\`intent(\\(?:in\\|out\\|inout\\))"
+                                  a))
+                        collect a)
                ", ")))
 
 (defun f90-fontify-arglist (arglist)
@@ -560,17 +573,17 @@ default is the type of the variable."
       (with-no-warnings (font-lock-fontify-buffer)))
     (goto-char (point-min))
     (mapconcat #'identity
-               (loop while (not (eobp))
-                     collect (buffer-substring (line-beginning-position)
-                                               (- (line-end-position)
-                                                  (length " :: foo")))
-                     do (forward-line 1))
+               (cl-loop while (not (eobp))
+                        collect (buffer-substring (line-beginning-position)
+                                                  (- (line-end-position)
+                                                     (length " :: foo")))
+                        do (forward-line 1))
                "; ")))
 
 (defun f90-count-non-optional-args (arglist)
   "Count non-optional args in ARGLIST."
-  (loop for arg in arglist
-        count (not (member "optional" (f90-get-parsed-type-modifiers arg)))))
+  (cl-loop for arg in arglist
+           count (not (member "optional" (f90-get-parsed-type-modifiers arg)))))
 
 (defun f90-approx-arglist-match (arglist specialiser &optional match-sub-list)
   "Return non-nil if ARGLIST matches the arglist of SPECIALISER.
@@ -584,13 +597,13 @@ first (length ARGLIST) args of SPECIALISER."
     (when (or match-sub-list
               (and (<= n-required-args n-passed-args)
                    (<= n-passed-args n-spec-args)))
-      (loop for arg in arglist
-            for spec-arg in spec-arglist
-            unless (or (null arg)
-                       (string= (f90-get-parsed-type-typename arg)
-                                (f90-get-parsed-type-typename spec-arg)))
-            do (return nil)
-            finally (return t)))))
+      (cl-loop for arg in arglist
+               for spec-arg in spec-arglist
+               unless (or (null arg)
+                          (string= (f90-get-parsed-type-typename arg)
+                                   (f90-get-parsed-type-typename spec-arg)))
+               do (cl-return nil)
+               finally (cl-return t)))))
 
 ;;; Internal functions
 
@@ -627,7 +640,7 @@ first (length ARGLIST) args of SPECIALISER."
 If INTERFACES is nil use `f90-all-interfaces' instead."
   (gethash name (or interfaces f90-all-interfaces)))
 
-(defsetf f90-get-interface (name &optional interfaces) (val)
+(gv-define-setter f90-get-interface (val name &optional interfaces)
   `(setf (gethash ,name (or ,interfaces f90-all-interfaces)) ,val))
 
 ;;; Entry point to parsing routines
@@ -639,10 +652,7 @@ This checks that FILE exists and is readable, and then calls
 additional test functions from `f90-file-name-check-functions'."
   (and (file-exists-p file)
        (file-readable-p file)
-       (loop for test in f90-file-name-check-functions
-             unless (funcall test file)
-             do (return nil)
-             finally (return t))))
+       (run-hook-with-args-until-failure 'f90-file-name-check-functions file)))
 
 (defun f90-check-fluidity-refcount (file)
   "Return nil if FILE is that of a Fluidity refcount template."
@@ -657,9 +667,8 @@ additional test functions from `f90-file-name-check-functions'."
 To actually insert extra files, customize the variable
 `f90-extra-file-functions'.  For an example insertion function
 see `f90-insert-fluidity-refcount'."
-  (let ((fname (file-name-nondirectory file)))
-    (loop for fn in f90-extra-file-functions
-          do (funcall fn file fname))))
+  (run-hook-with-args 'f90-extra-file-functions
+                      file (file-name-nondirectory file)))
 
 (defun f90-insert-fluidity-refcount (file fname)
   "Insert a Fluidity reference count template for FILE.
@@ -723,22 +732,23 @@ needs a reference count interface, so insert one."
 
         ;; Now find the arglists corresponding to the interface (so we
         ;; can disambiguate) and record their location in the file.
-        (loop for interface being the hash-values of interfaces
-              do (when (f90-interface-specialisers interface)
-                   (maphash (lambda (specialiser val)
-                              (save-excursion
-                                (goto-char (point-min))
-                                (let ((thing (f90-argument-list specialiser)))
-                                  (setf (f90-specialiser-arglist
-                                         val)
-                                        (cadr thing))
-                                  (setf (f90-specialiser-location
-                                         val)
-                                        (list file (caddr thing)))
-                                  (setf (f90-specialiser-type
-                                         val)
-                                        (car thing)))))
-                            (f90-interface-specialisers interface))))
+        (cl-loop
+         for interface being the hash-values of interfaces
+         do (when (f90-interface-specialisers interface)
+              (maphash (lambda (specialiser val)
+                         (save-excursion
+                           (goto-char (point-min))
+                           (let ((thing (f90-argument-list specialiser)))
+                             (setf (f90-specialiser-arglist
+                                    val)
+                                   (cadr thing))
+                             (setf (f90-specialiser-location
+                                    val)
+                                   (list file (caddr thing)))
+                             (setf (f90-specialiser-type
+                                    val)
+                                   (car thing)))))
+                       (f90-interface-specialisers interface))))
         ;; Finally merge these new interfaces into the existing data.
         (f90-merge-interfaces interfaces existing)))))
 
@@ -747,11 +757,11 @@ needs a reference count interface, so insert one."
   (let ((name (f90-interface-name interface))
         spec-name)
     (when (f90-interface-specialisers interface)
-      (loop for val being the hash-values of
-            (f90-interface-specialisers interface)
-            do (setq spec-name (f90-specialiser-name val))
-            (setf (gethash spec-name (f90-specialisers name interfaces))
-                  val)))))
+      (cl-loop for val being the hash-values of
+               (f90-interface-specialisers interface)
+               do (setq spec-name (f90-specialiser-name val))
+               (setf (gethash spec-name (f90-specialisers name interfaces))
+                     val)))))
 
 (defun f90-merge-interfaces (new existing)
   "Merge NEW interfaces into EXISTING ones."
@@ -889,11 +899,11 @@ needs a reference count interface, so insert one."
       ;; Show types of the same type together
       (setq types (sort types (lambda (x y)
                                 (string< (cadar x) (cadar y)))))
-      (loop for (type _name) in types
-            do
-            (insert (format "%s :: %s\n"
-                            (f90-format-parsed-slot-type type)
-                            (f90-get-parsed-type-varname type))))
+      (cl-loop for (type _name) in types
+               do
+               (insert (format "%s :: %s\n"
+                               (f90-format-parsed-slot-type type)
+                               (f90-get-parsed-type-varname type))))
       (pop-to-buffer (current-buffer))
       (goto-char (point-min))
       (setq buffer-read-only t))))
@@ -903,21 +913,23 @@ needs a reference count interface, so insert one."
 
 This works even with derived type subtypes (e.g. if A is a type(foo)
 with slot B of type REAL, then A%B is returned being a REAL)."
-  (loop for arg in names
-        for subspec = nil then nil
-        do (setq arg (f90-normalise-string arg))
-        if (string-match "\\`\\([^%]+?\\)[ \t]*%\\(.+\\)\\'" arg)
-        do (setq subspec (match-string 2 arg)
-                 arg (match-string 1 arg))
-        collect (save-excursion
-                  (save-restriction
-                    (when (re-search-forward
-                           (format "^[ \t]*\\([^!\n].+?\\)[ \t]*::.*\\_<%s\\_>"
-                                   arg) nil t)
-                      (goto-char (match-beginning 0))
-                      (let ((type (assoc arg
-                                         (f90-parse-single-type-declaration))))
-                        (f90-get-type-subtype type subspec)))))))
+  (cl-loop
+   for arg in names
+   for subspec = nil then nil
+   do (setq arg (f90-normalise-string arg))
+   if (string-match "\\`\\([^%]+?\\)[ \t]*%\\(.+\\)\\'" arg)
+   do (setq subspec (match-string 2 arg)
+            arg (match-string 1 arg))
+   collect (save-excursion
+             (save-restriction
+               (when (re-search-forward
+                      (format "^[ \t]*\\([^!\n].+?\\)[ \t]*::.*\\_<%s\\_>"
+                              arg)
+                      nil t)
+                 (goto-char (match-beginning 0))
+                 (let ((type (assoc arg
+                                    (f90-parse-single-type-declaration))))
+                   (f90-get-type-subtype type subspec)))))))
 
 (defun f90-get-type-subtype (type subspec)
   "Return the type of TYPE possibly including slot references in SUBSPEC."
@@ -944,22 +956,22 @@ For example:
   (f90-split-arglist \"foo, bar, baz(quux, zot)\" 1)
     => (\"foo\" \"bar\" \"baz(quux\" \"zot)\")."
   (setq level (or level 0))
-  (loop for c across arglist
-        for i = 0 then (1+ i)
-        with cur-level = 0
-        with b = 0
-        with len = (length arglist)
-        if (eq c ?\()
-        do (incf cur-level)
-        else if (eq c ?\))
-        do (decf cur-level)
-        if (and (<= cur-level level)
-                (eq c ?,))
-        collect (f90-normalise-string (substring arglist b i))
-        and do (setq b (1+ i))
-        if (and (<= cur-level level)
-                (= (1+ i) len))
-        collect (f90-normalise-string (substring arglist b))))
+  (cl-loop for c across arglist
+           for i = 0 then (1+ i)
+           with cur-level = 0
+           with b = 0
+           with len = (length arglist)
+           if (eq c ?\()
+           do (cl-incf cur-level)
+           else if (eq c ?\))
+           do (cl-decf cur-level)
+           if (and (<= cur-level level)
+                   (eq c ?,))
+           collect (f90-normalise-string (substring arglist b i))
+           and do (setq b (1+ i))
+           if (and (<= cur-level level)
+                   (= (1+ i) len))
+           collect (f90-normalise-string (substring arglist b))))
 
 (defun f90-end-of-arglist ()
   "Find the end of the arglist at `point'."
@@ -967,9 +979,9 @@ For example:
     (let ((level 0))
       (while (> level -1)
         (cond ((eq (char-after) ?\()
-               (incf level))
+               (cl-incf level))
               ((eq (char-after) ?\))
-               (decf level))
+               (cl-decf level))
               (t nil))
         (forward-char)))
     (1- (point))))
@@ -977,11 +989,11 @@ For example:
 (defun f90-parse-names-list (names)
   "Return a list of NAMES from the RHS of a :: type declaration."
   (let ((names-list (f90-split-arglist names)))
-    (loop for name in names-list
-          if (string-match "\\`\\([^=]+\\)[ \t]*=.*\\'" name)
-          collect (f90-normalise-string (match-string 1 name))
-          else
-          collect (f90-normalise-string name))))
+    (cl-loop for name in names-list
+             if (string-match "\\`\\([^=]+\\)[ \t]*=.*\\'" name)
+             collect (f90-normalise-string (match-string 1 name))
+             else
+             collect (f90-normalise-string name))))
 
 (defun f90-parse-single-type-declaration ()
   "Parse a single f90 type declaration at `point'.
@@ -994,20 +1006,20 @@ dealt with correctly."
   (when (looking-at "^[ \t]*\\(.*?\\)[ \t]*::[ \t]*\\(.*\\)$")
     (let ((dec-orig (match-string 1))
           (names (f90-parse-names-list (match-string 2))))
-      (loop for name in names
-            for dec = (f90-split-declaration dec-orig)
-            then (f90-split-declaration dec-orig)
-            if (string-match "\\([^(]+\\)(\\([^)]+\\))" name)
-            do (progn (if (assoc "dimension" dec)
-                          (setcdr (assoc "dimension" dec)
-                                  (1+ (f90-count-commas
-                                       (match-string 2 name))))
-                        (push (cons "dimension"
-                                    (1+ (f90-count-commas
-                                         (match-string 2 name))))
-                              dec))
-                      (setq name (match-string 1 name)))
-            collect (cons name (nreverse dec))))))
+      (cl-loop for name in names
+               for dec = (f90-split-declaration dec-orig)
+               then (f90-split-declaration dec-orig)
+               if (string-match "\\([^(]+\\)(\\([^)]+\\))" name)
+               do (progn (if (assoc "dimension" dec)
+                             (setcdr (assoc "dimension" dec)
+                                     (1+ (f90-count-commas
+                                          (match-string 2 name))))
+                           (push (cons "dimension"
+                                       (1+ (f90-count-commas
+                                            (match-string 2 name))))
+                                 dec))
+                         (setq name (match-string 1 name)))
+               collect (cons name (nreverse dec))))))
 
 (defun f90-split-declaration (dec)
   "Split and parse a type declaration DEC.
@@ -1020,12 +1032,12 @@ and any modifiers."
                (car things))
               (match-string 1 (car things))
             (car things))
-          (loop for thing in (cdr things)
-                if (string-match "dimension[ \t]*(\\(.+\\))" thing)
-                collect (cons "dimension"
-                              (1+ (f90-count-commas (match-string 1 thing))))
-                else
-                collect thing))))
+          (cl-loop for thing in (cdr things)
+                   if (string-match "dimension[ \t]*(\\(.+\\))" thing)
+                   collect (cons "dimension"
+                                 (1+ (f90-count-commas (match-string 1 thing))))
+                   else
+                   collect thing))))
 
 (provide 'f90-interface-browser)
 
