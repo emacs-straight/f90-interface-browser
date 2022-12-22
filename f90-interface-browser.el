@@ -4,7 +4,7 @@
 
 ;; Author: Lawrence Mitchell <wence@gmx.li>
 ;; Created: 2011-07-06
-;; URL: http://github.com/wence-/f90-iface/
+;; URL: https://github.com/wence-/f90-iface/
 ;; Version: 1.1
 ;; Package-Requires: ((cl-lib "0.7"))
 
@@ -21,7 +21,7 @@
 ;; GNU General Public License for more details.
 
 ;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 ;; You write (or work on) large, modern fortran code bases.  These
